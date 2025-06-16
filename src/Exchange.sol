@@ -1,0 +1,271 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+import "lib/openzeppelin-contracts/contracts/token/ERC20/ERC20.sol";
+//import "UniSwap-V1/lib/openzeppelin-contracts/contracts/token/ERC20/ERC20.sol";
+
+// Minimal IFactory and IExchange interface definitions
+interface IFactory {
+    function getExchange(address _tokenAddress) external returns (address);
+}
+// Minimal IExchange interface definition
+interface IExchange {
+    function ethToTokenSwap(uint256 _minTokens) external payable;
+    // 增加ethToTokenTransfer函数的抽象函数
+    function ethToTokenTransfer(uint256 _minTokens, address _recipient) external payable;
+}
+
+contract Exchange is ERC20 {
+        //event
+    event AddLiquidity(address indexed provider, uint256 indexed eth_amount, uint256 indexed token_amount);
+
+    event RemoveLiquidity(address indexed provider, uint256 indexed eth_amount, uint256 indexed token_amount);
+
+    event TokenPurchase(address indexed buyer, uint256 indexed eth_sold, uint256 indexed tokens_bought);
+
+    event EthPurchase(address indexed buyer, uint256 indexed tokens_sold, uint256 indexed eth_bought);
+
+
+    // Token地址，可见性为公开
+    address public tokenAddress;
+
+    // 创建工厂合约地址，可见性为公开
+    address public factoryAddress;
+
+
+    // 传入代币地址，代币名称默认为Uniswap-V1，符号为UNI-V1，也可以自定义
+    constructor(address _token) ERC20("Uniswap-V1", "UNI-V1") {
+        require(_token != address(0), "invalid token address");
+        tokenAddress = _token;
+
+        // 工厂合约地址状态变量赋值为调用者地址
+        factoryAddress = msg.sender;
+    }
+
+    /**
+     * @dev 获取当前交易所中代币的储备量
+     * @return 代币储备量
+     */
+    function getReserve() public view returns (uint256) {
+        // 调用IERC20，传入参数为Token地址，使用balanceOf方法，传入参数为当前合约地址
+        return IERC20(tokenAddress).balanceOf(address(this));
+    }
+
+    /**
+     * @dev 计算价格比率：输入储备量/输出储备量 * 1000
+     * @param inputReserve 输入代币的储备量
+     * @param outputReserve 输出代币的储备量
+     * @return 价格比率（放大1000倍）
+     */
+    function getPrice(uint256 inputReserve, uint256 outputReserve) public pure returns (uint256){
+        // 检查如果两个都不大于0，则输出错误信息"invalid reserves"
+        require(inputReserve > 0 && outputReserve > 0, "invalid reserves");
+        // 返回输入值先放大1000倍再除以输出的结果
+        return (inputReserve * 1000) / outputReserve;
+    }
+
+    /**
+     * @dev 计算交换数量：使用恒定乘积公式 (x * y = k)，考虑0.3%的手续费
+     * @param inputAmount 输入代币数量
+     * @param inputReserve 输入代币的储备量
+     * @param outputReserve 输出代币的储备量
+     * @return 可获得的输出代币数量
+     */
+    function getAmount(uint256 inputAmount, uint256 inputReserve, uint256 outputReserve) private pure returns (uint256) {
+        // 检查输入代币储量和输出代币储量都大于0，否则报错"invalid reserves"
+        require(inputReserve > 0 && outputReserve > 0, "invalid reserves");
+        // 考虑费用情况下，自定义变量带费用输入量并赋值为inputAmount乘99倍
+        uint256 inputAmountWithFee = inputAmount * 997;
+        // 自定义变量分子并赋值为带费用总量乘以输出代币储量
+        uint256 numerator = inputAmountWithFee * outputReserve;
+        // 自定义变量分母并赋值为（输入代币储量乘100倍）加上带费用输入量
+        uint256 denominator = (inputReserve * 1000) + inputAmountWithFee;
+        // 返回分子除以分母，即当前输出代币量
+        return numerator / denominator;
+    }
+
+
+    /**
+     * @dev 计算用ETH换取代币的数量
+     * @param _ethSold 卖出的ETH数量
+     * @return 可获得的代币数量
+     */
+    function getTokenAmount(uint256 _ethSold) public view returns (uint256) {
+        // 检查传入变量大于0，否则输出错误信息"ethSold is too small"
+        require(_ethSold > 0, "ethSold is too small");
+        // 创建变量并调用方法赋值当前交易所储量
+        uint256 tokenReserve = getReserve();
+        // 调用getAmount传入三个变量并返回，三个变量分别是ETH出售量，this指向地址余额，当前交易所储量
+        return getAmount(_ethSold, address(this).balance, tokenReserve);
+    }
+
+    /**
+     * @dev 计算用代币换取ETH的数量
+     * @param _tokenSold 卖出的代币数量
+     * @return 可获得的ETH数量
+     */
+    function getEthAmount(uint256 _tokenSold) public view returns (uint256) {
+        // 检查传入变量大于0，否则输出错误信息"tokenSold is too small"
+        require(_tokenSold > 0, "tokenSold is too small");
+        // 创建变量并调用方法赋值当前交易所储量
+        uint256 tokenReserve = getReserve();
+        // 调用getAmount传入三个变量并返回，三个变量分别是代币出售量，当前交易所储量，this指向地址余额
+        return getAmount(_tokenSold, tokenReserve, address(this).balance);
+    }
+
+    /**
+     * @dev 内部函数：处理ETH到代币的交换核心逻辑
+     * @param _minTokens 最小接收的代币数量（防止滑点）
+     * @param recipient 接收代币的地址
+     */
+    function ethToToken(uint256 _minTokens, address recipient) private {
+        // 定义变量并赋值当前交易所储量
+        uint256 tokenReserve = getReserve();
+        // 定义变量tokensBought并用getAmount返回值赋值，传入参数是当前调用者发送的wei数量msg.value、合约余额减去调用者msg.value、当前交易所代币储量
+        uint256 tokensBought = getAmount(msg.value, address(this).balance - msg.value, tokenReserve);
+        // 检查当前输出代币余额是否大于用户预计换取的余额，否则报错"insufficient output amount"
+        require(tokensBought >= _minTokens, "insufficient output amount");
+        // 调用交易所地址的transfer函数向传入的recipient发送tokensBought数量代币
+        IERC20(tokenAddress).transfer(recipient, tokensBought);
+    }  
+    
+    /**
+     * @dev 用ETH交换代币
+     * @param _minTokens 最小接收的代币数量（防止滑点）
+     */
+    function ethToTokenSwap(uint256 _minTokens) public payable {
+        // 自定义传入至少多少代币的数量，并传递合约调用者地址作为参数给ethToToken函数
+        ethToToken(_minTokens, msg.sender);
+        // 触发EthPurchase事件
+        emit EthPurchase(msg.sender, msg.value, _minTokens);
+    }
+
+    /**
+     * @dev 用ETH交换代币并发送给指定接收者
+     * @param _minTokens 最小接收的代币数量（防止滑点）
+     * @param _recipient 接收代币的地址
+     */
+    function ethToTokenTransfer(uint256 _minTokens, address _recipient) public payable{
+        // 用ethToToken函数传入换取至少多少代币的数量和目标地址
+        ethToToken(_minTokens, _recipient);
+        // 触发EthPurchase事件
+        emit EthPurchase(_recipient, msg.value, _minTokens);
+    }
+
+    /**
+     * @dev 用代币交换ETH
+     * @param _tokensSold 卖出的代币数量
+     * @param _minEth 最小接收的ETH数量（防止滑点）
+     */
+    function tokenToEthSwap(uint256 _tokensSold, uint256 _minEth) public {
+        // 自定义变量并赋值当前交易所储量
+        uint256 tokenReserve = getReserve();
+        // 自定义变量ethBought并用getAmount返回值赋值，传入参数是当前调用者出售代币数量_tokensSold、当前交易所代币储量、合约余额
+        uint256 ethBought = getAmount(_tokensSold, tokenReserve, address(this).balance);
+        // 检查当前可输出ETH余额是否大于用户预计换取的余额，否则报错"insufficient output amount"
+        require(ethBought >= _minEth, "insufficient output amount");
+        // 调用交易所地址的transferFrom函数从msg.sender向交易所合约地址发送实际要出售代币数量
+        IERC20(tokenAddress).transferFrom(msg.sender, address(this), _tokensSold);
+        // payable(msg.sender)调用transfer函数发送实际购买的ethBought
+        payable(msg.sender).transfer(ethBought);
+        // 触发TokenPurchase事件
+        emit TokenPurchase(msg.sender, _tokensSold, ethBought);
+    }
+
+    /**
+     * @dev 添加流动性
+     * @param _tokenAmount 添加的代币数量
+     * @return 获得的LP代币数量
+     */
+    function addLiquidity(uint256 _tokenAmount) public payable returns (uint256){
+        // 分支结构开始如果交易所之前储量为零 
+        if (getReserve() == 0) {
+            // 创建IERC20属性的代币变量，并用IERC20方法传入交易所地址复制给变量
+            IERC20 token = IERC20(tokenAddress);
+            // 用代币变量调用transferFrom方法，传入参数是调用者地址，本交易所地址，数量是函数传入数量
+            token.transferFrom(msg.sender, address(this), _tokenAmount);
+
+            // 自定义变量流动性并赋值当前合约余额
+            uint256 liquidity = address(this).balance;
+            // 在当前分支结构为初次添加流动性时候向发起调用当前函数的地址等量铸造交易所代币
+            _mint(msg.sender, liquidity);
+            // 触发AddLiquidity事件
+            emit AddLiquidity(msg.sender, msg.value, _tokenAmount);
+            // 触发Transfer事件
+            emit Transfer(address(0), msg.sender, liquidity);
+            // 返回流动性
+            return liquidity;
+
+        } 
+        // 分支结构开始如果交易所之前储量不为零 
+        else {
+            // 自定义ETH储量变量并赋值当前合约余额减去合约调用使用的ETH
+            uint256 ethReserve = address(this).balance - msg.value;
+            // 自定义代币储量变量并赋值当前交易所余额
+            uint256 tokenReserve = getReserve();
+            // 自定义代应按照比例应当存储的币量变量并赋值结果，即赋值（合约调用使用的ETH*代币储量）/ETH储量
+            uint256 tokenAmount = (msg.value * tokenReserve) / ethReserve;
+            require(_tokenAmount >= tokenAmount, "insufficient token amount");
+            // 创建IERC20属性的代币变量，并用IERC20方法传入交易所地址复制给变量
+            IERC20 token = IERC20(tokenAddress);
+            // 用代币变量调用transferFrom方法，传入参数是调用者地址，本交易所地址，数量是函数传入数量
+            token.transferFrom(msg.sender, address(this), tokenAmount);
+        
+            // 自定义变量流动性并赋值（当前流动性总数totalSupply()乘以合约使用ETH数量）除以ETH储量
+            uint256 liquidity = (totalSupply() * msg.value) / ethReserve;
+            // 在当前分支结构添加流动性时候向发起调用当前函数的地址等比例铸造交易所代币
+            _mint(msg.sender, liquidity);
+            // 触发AddLiquidity事件
+            emit AddLiquidity(msg.sender, msg.value, tokenAmount);
+            // 触发Transfer事件
+            emit Transfer(address(0), msg.sender, liquidity);
+            // 返回流动性
+            return liquidity;
+        }
+    }
+
+    /**
+     * @dev 移除流动性
+     * @param _amount 销毁的LP代币数量
+     * @return 获得的ETH数量
+     * @return 获得的代币数量
+     */
+    function removeLiquidity(uint256 _amount) public returns (uint256, uint256) {
+        // 检查提取数量应当大于0
+        require(_amount > 0, "invalid amount");
+
+        // 自定义变量ETH数量并赋值为（当前合约余额乘提取数量）除以代币总量totalSupply()
+        uint256 ethAmount = (address(this).balance * _amount) / totalSupply();
+        // 自定义变量代币数量并赋值为（交易所储量getReserve()乘提取数量）除以代币总量totalSupply()
+        uint256 tokenAmount = (getReserve() * _amount) / totalSupply();
+        // 烧毁调用者相应数量的代币
+        _burn(msg.sender, _amount);
+        // 向调用者发送相应数量的ETH
+        payable(msg.sender).transfer(ethAmount);
+        // 合约地址向调用者传送给调用者相应数量的代币
+        IERC20(tokenAddress).transfer(msg.sender, tokenAmount);
+        // 触发RemoveLiquidity事件
+        emit RemoveLiquidity(msg.sender, ethAmount, tokenAmount);
+        // 返回ETH数量和代币数量
+        // 触发Transfer事件
+        emit Transfer(msg.sender, address(0), _amount);
+        return (ethAmount, tokenAmount);
+    }
+
+    /**
+     * @dev 代币到代币的交换
+     * @param _tokensSold 卖出的代币数量
+     * @param _minTokensBought 最小接收的代币数量（防止滑点）
+     * @param _tokenAddress 目标代币的地址
+     */
+    function tokenToTokenSwap(uint256 _tokensSold, uint256 _minTokensBought, address _tokenAddress) public {
+        address exchangeAddress = IFactory(factoryAddress).getExchange(_tokenAddress);
+        require(exchangeAddress != address(this) && exchangeAddress != address(0), "invalid exchange address");
+        uint256 tokenReserve = getReserve();
+        uint256 ethBought = getAmount(_tokensSold, tokenReserve, address(this).balance);
+        IERC20(tokenAddress).transferFrom(msg.sender, address(this), _tokensSold);
+        // 调用IExchange接口根据交易所地址exchangeAddress调用ethToTokenTransfer函数转出_minTokens数量代币
+        IExchange(exchangeAddress).ethToTokenTransfer{value: ethBought}(_minTokensBought, msg.sender);
+    }
+
+}
