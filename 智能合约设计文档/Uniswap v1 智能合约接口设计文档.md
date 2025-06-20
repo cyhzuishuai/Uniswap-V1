@@ -71,10 +71,10 @@ return:[
 ]
 ```
 
-### 6.获取当前交易所代币储备量
+### 6.获取当前交易所ERC20代币储备量
 
 ```
-获取当前交易所中代币的储备量
+获取当前交易所中代币的储备量 token
 function: getReserve public view
 arguments: []
 return:[
@@ -140,6 +140,107 @@ arguments:
 return:
 	address // 该代币对应的交易所（Exchange）合约地址
 ```
+
+## Token合约
+
+### 1.代币的名称
+
+```
+ 获取代币的名称
+ function: name public view
+ arguments：无
+ returns ：
+ 	string //返回的代币名称
+```
+
+### 2.获取代币的小数
+
+```
+获取代币的小数多少位
+function: decimals public view 
+arguments:无
+returns:
+	uint8 //返回代币的小数位数
+```
+
+### 3.获取代币总供应量
+
+```
+获取代币总供应量
+function: totalSupply public view
+arguments: 无
+returns: 
+    uint256 // 返回代币的总供应量
+```
+
+### 4.根据账户地址返回代币余额
+
+```
+根据账户地址返回代币余额
+function: balanceOf public view
+arguments:
+    address account // 要查询的账户地址
+returns: 
+    uint256 // 返回指定账户的代币余额
+```
+
+### 5.从自己账户转移代币
+
+```
+function: transfer public
+arguments:
+    address to // 接收代币的地址
+    uint256 amount // 转移的代币数量
+returns: 
+    bool // 成功返回true，失败返回false
+```
+
+### 6.获取从代币所有者到被授权地址的授权数量
+
+```
+function: allowance public view
+arguments:
+    address owner // 代币所有者地址
+    address spender // 被授权的地址
+returns: 
+    uint256 // 返回spender被允许从owner账户转移的代币数量
+```
+
+### 7.将自己一定数量的代币授权给别的地址
+
+```
+function: approve public
+arguments:
+    address spender // 被授权的地址
+    uint256 amount // 授权数量
+returns: 
+    bool // 成功返回true，失败返回false
+
+```
+
+### 8.从授权地址里转移代币（交易所调用）
+
+```
+function: transferFrom public
+arguments:
+    address from // 发送代币的地址
+    address to // 接收代币的地址
+    uint256 amount // 转移的代币数量
+returns: 
+    bool // 成功返回true，失败返回false
+
+```
+
+9.获取代币的符号
+
+```
+function: symbol public view
+arguments: 无
+returns: 
+    string memory // 返回代币的符号
+```
+
+
 
 ## 构造函数
 
